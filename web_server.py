@@ -70,11 +70,44 @@ class BotManager:
         self.risk = RiskState()
         self.running = False
         self.symbol = config.symbol
+        self.duration = config.duration
+        self.duration_unit = config.duration_unit
+        self.ml_confidence_threshold = config.ml_confidence_threshold
         self.trade_log: list[dict] = []
         self.latest_row: Optional[dict] = None
         self.status_text = "stopped"
         self._task: Optional[asyncio.Task] = None
         self._subscribers: list[WebSocket] = []
+
+    def get_settings(self) -> dict:
+        return {
+            "stake": self.risk.stake,
+            "duration": self.duration,
+            "duration_unit": self.duration_unit,
+            "daily_loss_cap": self.risk.daily_loss_cap,
+            "max_trades_per_day": self.risk.max_trades_per_day,
+            "max_consecutive_losses": self.risk.max_consecutive_losses,
+            "ml_confidence_threshold": self.ml_confidence_threshold,
+        }
+
+    def update_settings(self, **kwargs):
+        if self.running:
+            raise ValueError("Stop the bot before changing settings")
+        if "stake" in kwargs:
+            self.risk.stake = float(kwargs["stake"])
+        if "duration" in kwargs:
+            self.duration = int(kwargs["duration"])
+        if "daily_loss_cap" in kwargs:
+            self.risk.daily_loss_cap = float(kwargs["daily_loss_cap"])
+        if "max_trades_per_day" in kwargs:
+            self.risk.max_trades_per_day = int(kwargs["max_trades_per_day"])
+        if "max_consecutive_losses" in kwargs:
+            self.risk.max_consecutive_losses = int(kwargs["max_consecutive_losses"])
+        if "ml_confidence_threshold" in kwargs:
+            self.ml_confidence_threshold = float(kwargs["ml_confidence_threshold"])
+        # a fresh settings save also clears any prior halt, since the user is
+        # deliberately reconfiguring before starting again
+        self.risk.reset_halt()
 
     async def broadcast(self, message: dict):
         dead = []
@@ -130,8 +163,8 @@ class BotManager:
             contract_type=action,
             symbol=self.symbol,
             stake=stake,
-            duration=config.duration,
-            duration_unit=config.duration_unit,
+            duration=self.duration,
+            duration_unit=self.duration_unit,
         )
         contract_id = buy_resp["contract_id"]
         await self.broadcast({"type": "log", "text": f"Manual {action} placed, contract {contract_id}"})
@@ -158,7 +191,7 @@ class BotManager:
 
                 feat_df = build_features(df)
                 latest = feat_df.iloc[-1]
-                decision = decide(latest, self.model)
+                decision = decide(latest, self.model, confidence_threshold=self.ml_confidence_threshold)
 
                 self.latest_row = {
                     "close": float(latest["close"]),
@@ -181,8 +214,8 @@ class BotManager:
                         contract_type=decision.action,
                         symbol=self.symbol,
                         stake=stake,
-                        duration=config.duration,
-                        duration_unit=config.duration_unit,
+                        duration=self.duration,
+                        duration_unit=self.duration_unit,
                     )
                     contract_id = buy_resp["contract_id"]
                     profit = await self.client.get_contract_result(contract_id)
@@ -223,6 +256,31 @@ class StartRequest(BaseModel):
 
 class TradeRequest(BaseModel):
     action: str  # "CALL" or "PUT"
+
+
+class SettingsRequest(BaseModel):
+    stake: Optional[float] = None
+    duration: Optional[int] = None
+    daily_loss_cap: Optional[float] = None
+    max_trades_per_day: Optional[int] = None
+    max_consecutive_losses: Optional[int] = None
+    ml_confidence_threshold: Optional[float] = None
+
+
+@app.get("/api/settings")
+async def get_settings(token: str = Header(None, alias="Authorization")):
+    require_auth(token)
+    return bot.get_settings()
+
+
+@app.post("/api/settings")
+async def post_settings(req: SettingsRequest, token: str = Header(None, alias="Authorization")):
+    require_auth(token)
+    try:
+        bot.update_settings(**{k: v for k, v in req.dict().items() if v is not None})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return bot.get_settings()
 
 
 @app.post("/api/train")

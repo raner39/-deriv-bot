@@ -93,6 +93,43 @@
     <div id="model-status" style="margin-top:10px; font-size:13px; color: var(--muted);">Checking model status...</div>
   </div>
 
+  <div class="panel">
+    <strong>⚙️ Trade Settings</strong>
+    <div class="grid" style="margin-top:10px;">
+      <div>
+        <div class="stat-label">Stake per trade ($)</div>
+        <input id="set-stake" type="number" step="0.5" min="0.5" value="1">
+      </div>
+      <div>
+        <div class="stat-label">Duration (ticks)</div>
+        <input id="set-duration" type="number" step="1" min="1" value="5">
+      </div>
+      <div>
+        <div class="stat-label">Daily loss cap ($)</div>
+        <input id="set-loss-cap" type="number" step="1" min="1" value="20">
+      </div>
+      <div>
+        <div class="stat-label">Max trades/day</div>
+        <input id="set-max-trades" type="number" step="1" min="1" value="30">
+      </div>
+      <div>
+        <div class="stat-label">Max losses in a row</div>
+        <input id="set-max-losses" type="number" step="1" min="1" value="4">
+      </div>
+      <div>
+        <div class="stat-label">ML confidence (0.5-0.9)</div>
+        <input id="set-ml-conf" type="number" step="0.05" min="0.5" max="0.9" value="0.6">
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px; justify-content: space-between;">
+      <span id="settings-status" style="font-size:12px; color: var(--muted);"></span>
+      <button class="btn-primary" style="width:auto;" onclick="saveSettings()">💾 Save Settings</button>
+    </div>
+    <div style="font-size:12px; color: var(--muted); margin-top:8px;">
+      Stop the bot before changing settings. These apply to both the automated bot and the manual override buttons.
+    </div>
+  </div>
+
   <div class="panel grid">
     <div><div class="stat-label">Balance</div><div class="stat-value" id="stat-balance">--</div></div>
     <div><div class="stat-label">Account</div><div class="stat-value" id="stat-account">--</div></div>
@@ -147,6 +184,7 @@ async function login() {
     initChart();
     connectWS();
     refreshStatus();
+    loadSettings();
   } catch (e) {
     document.getElementById('login-error').textContent = e.message;
   }
@@ -154,6 +192,40 @@ async function login() {
 
 function authHeaders() {
   return {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'};
+}
+
+async function loadSettings() {
+  const res = await fetch('/api/settings', {headers: authHeaders()});
+  if (!res.ok) return;
+  const s = await res.json();
+  document.getElementById('set-stake').value = s.stake;
+  document.getElementById('set-duration').value = s.duration;
+  document.getElementById('set-loss-cap').value = s.daily_loss_cap;
+  document.getElementById('set-max-trades').value = s.max_trades_per_day;
+  document.getElementById('set-max-losses').value = s.max_consecutive_losses;
+  document.getElementById('set-ml-conf').value = s.ml_confidence_threshold;
+}
+
+async function saveSettings() {
+  const statusEl = document.getElementById('settings-status');
+  const payload = {
+    stake: parseFloat(document.getElementById('set-stake').value),
+    duration: parseInt(document.getElementById('set-duration').value),
+    daily_loss_cap: parseFloat(document.getElementById('set-loss-cap').value),
+    max_trades_per_day: parseInt(document.getElementById('set-max-trades').value),
+    max_consecutive_losses: parseInt(document.getElementById('set-max-losses').value),
+    ml_confidence_threshold: parseFloat(document.getElementById('set-ml-conf').value),
+  };
+  const res = await fetch('/api/settings', {method: 'POST', headers: authHeaders(), body: JSON.stringify(payload)});
+  if (!res.ok) {
+    const err = await res.json();
+    statusEl.textContent = '❌ ' + (err.detail || 'Failed to save');
+    statusEl.style.color = 'var(--red)';
+    return;
+  }
+  statusEl.textContent = '✅ Settings saved';
+  statusEl.style.color = 'var(--green)';
+  setTimeout(() => { statusEl.textContent = ''; }, 3000);
 }
 
 async function trainModel() {

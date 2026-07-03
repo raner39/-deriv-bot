@@ -22,11 +22,14 @@ from pydantic import BaseModel
 
 from config import config
 from deriv_client import DerivClient
-from ml_signal import build_features, load_model
+from ml_signal import build_features, load_model, train as train_model_fn
 from strategy import decide
 from risk import RiskState
+import os.path
 
 app = FastAPI()
+
+MODEL_PATH = "model.joblib"
 
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 SESSION_TOKENS: set[str] = set()
@@ -87,17 +90,31 @@ class BotManager:
         if self.client is None:
             self.client = DerivClient()
             await self.client.connect()
-        if self.model is None:
+        if self.model is None and os.path.exists(MODEL_PATH):
             self.model = load_model()
+
+    async def train_model(self, symbol: str, count: int = 5000):
+        await self.ensure_connected()
+        candles = await self.client.get_candles(symbol, count=count, granularity=60)
+        df = pd.DataFrame(candles)
+        for col in ["open", "high", "low", "close"]:
+            df[col] = df[col].astype(float)
+        model, acc = train_model_fn(df, save_path=MODEL_PATH)
+        self.model = model
+        return acc
 
     async def start(self, symbol: str):
         if self.running:
             return
         self.symbol = symbol
         await self.ensure_connected()
+        if self.model is None:
+            self.status_text = "no model trained yet -- click Train Model first"
+            return
         self.running = True
         self.status_text = f"running on {symbol}"
         self._task = asyncio.create_task(self._loop())
+
 
     async def stop(self):
         self.running = False
@@ -208,6 +225,16 @@ class TradeRequest(BaseModel):
     action: str  # "CALL" or "PUT"
 
 
+@app.post("/api/train")
+async def train_endpoint(req: StartRequest, token: str = Header(None, alias="Authorization")):
+    require_auth(token)
+    try:
+        acc = await bot.train_model(req.symbol)
+        return {"trained": True, "holdout_accuracy": acc}
+    except Exception as e:
+        raise HTTPException(500, f"Training failed: {e}")
+
+
 @app.post("/api/start")
 async def start_bot(req: StartRequest, token: str = Header(None, alias="Authorization")):
     require_auth(token)
@@ -244,6 +271,7 @@ async def status(token: str = Header(None, alias="Authorization")):
         "trades_today": bot.risk.trades_today,
         "balance": bot.client.balance if bot.client else None,
         "is_virtual": bot.client.is_virtual if bot.client else None,
+        "model_trained": bot.model is not None,
     }
 
 

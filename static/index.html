@@ -85,10 +85,12 @@
         </select>
       </div>
       <div class="row">
+        <button class="btn-primary" style="width:auto; background:#8b5cf6;" onclick="trainModel()">🧠 Train Model</button>
         <button class="btn-start" onclick="startBot()">▶ Start Bot</button>
         <button class="btn-stop" onclick="stopBot()">■ Stop Bot</button>
       </div>
     </div>
+    <div id="model-status" style="margin-top:10px; font-size:13px; color: var(--muted);">Checking model status...</div>
   </div>
 
   <div class="panel grid">
@@ -154,6 +156,25 @@ function authHeaders() {
   return {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'};
 }
 
+async function trainModel() {
+  const symbol = document.getElementById('symbol-select').value;
+  const statusEl = document.getElementById('model-status');
+  statusEl.textContent = '🧠 Training on ' + symbol + '... this can take 20-40 seconds, don\'t close the page.';
+  try {
+    const res = await fetch('/api/train', {method: 'POST', headers: authHeaders(), body: JSON.stringify({symbol})});
+    if (!res.ok) {
+      const err = await res.json();
+      statusEl.textContent = '❌ Training failed: ' + (err.detail || 'unknown error');
+      return;
+    }
+    const data = await res.json();
+    statusEl.textContent = `✅ Model trained. Holdout accuracy: ${(data.holdout_accuracy*100).toFixed(1)}% (50% = coin flip, higher is better but be skeptical of anything much above ~55-60%)`;
+    refreshStatus();
+  } catch (e) {
+    statusEl.textContent = '❌ Training failed: ' + e.message;
+  }
+}
+
 async function startBot() {
   const symbol = document.getElementById('symbol-select').value;
   await fetch('/api/start', {method: 'POST', headers: authHeaders(), body: JSON.stringify({symbol})});
@@ -184,6 +205,14 @@ async function refreshStatus() {
   document.getElementById('stat-pnl').textContent = s.daily_pnl.toFixed(2);
   document.getElementById('stat-pnl').className = 'stat-value ' + (s.daily_pnl >= 0 ? 'profit-pos' : 'profit-neg');
   document.getElementById('stat-trades').textContent = s.trades_today;
+  const modelStatusEl = document.getElementById('model-status');
+  if (s.model_trained) {
+    if (!modelStatusEl.textContent.includes('Holdout accuracy')) {
+      modelStatusEl.textContent = '✅ Model is trained and ready.';
+    }
+  } else {
+    modelStatusEl.textContent = '⚠️ No model trained yet — click "Train Model" before Start Bot.';
+  }
   if (s.latest_row) {
     document.getElementById('stat-rsi').textContent = s.latest_row.rsi.toFixed(1);
   }

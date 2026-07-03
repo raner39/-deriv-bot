@@ -16,16 +16,18 @@ class Decision:
     ml_confidence: float
 
 
-def decide(row, model) -> Decision:
+def decide(row, model, confidence_threshold: float = None) -> Decision:
+    threshold = confidence_threshold if confidence_threshold is not None else config.ml_confidence_threshold
+
     rb = rule_signal(row)
     proba_up = predict_proba_up(model, row)
     proba_down = 1 - proba_up
 
     ml_bias = "none"
     ml_conf = 0.0
-    if proba_up >= config.ml_confidence_threshold:
+    if proba_up >= threshold:
         ml_bias, ml_conf = "up", proba_up
-    elif proba_down >= config.ml_confidence_threshold:
+    elif proba_down >= threshold:
         ml_bias, ml_conf = "down", proba_down
 
     if rb == "up" and ml_bias == "up":

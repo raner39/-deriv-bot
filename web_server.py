@@ -22,14 +22,11 @@ from pydantic import BaseModel
 
 from config import config
 from deriv_client import DerivClient
-from ml_signal import build_features, load_model, train as train_model_fn
+from ml_signal import build_features, load_model
 from strategy import decide
 from risk import RiskState
-import os.path
 
 app = FastAPI()
-
-MODEL_PATH = "model.joblib"
 
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 SESSION_TOKENS: set[str] = set()
@@ -70,44 +67,11 @@ class BotManager:
         self.risk = RiskState()
         self.running = False
         self.symbol = config.symbol
-        self.duration = config.duration
-        self.duration_unit = config.duration_unit
-        self.ml_confidence_threshold = config.ml_confidence_threshold
         self.trade_log: list[dict] = []
         self.latest_row: Optional[dict] = None
         self.status_text = "stopped"
         self._task: Optional[asyncio.Task] = None
         self._subscribers: list[WebSocket] = []
-
-    def get_settings(self) -> dict:
-        return {
-            "stake": self.risk.stake,
-            "duration": self.duration,
-            "duration_unit": self.duration_unit,
-            "daily_loss_cap": self.risk.daily_loss_cap,
-            "max_trades_per_day": self.risk.max_trades_per_day,
-            "max_consecutive_losses": self.risk.max_consecutive_losses,
-            "ml_confidence_threshold": self.ml_confidence_threshold,
-        }
-
-    def update_settings(self, **kwargs):
-        if self.running:
-            raise ValueError("Stop the bot before changing settings")
-        if "stake" in kwargs:
-            self.risk.stake = float(kwargs["stake"])
-        if "duration" in kwargs:
-            self.duration = int(kwargs["duration"])
-        if "daily_loss_cap" in kwargs:
-            self.risk.daily_loss_cap = float(kwargs["daily_loss_cap"])
-        if "max_trades_per_day" in kwargs:
-            self.risk.max_trades_per_day = int(kwargs["max_trades_per_day"])
-        if "max_consecutive_losses" in kwargs:
-            self.risk.max_consecutive_losses = int(kwargs["max_consecutive_losses"])
-        if "ml_confidence_threshold" in kwargs:
-            self.ml_confidence_threshold = float(kwargs["ml_confidence_threshold"])
-        # a fresh settings save also clears any prior halt, since the user is
-        # deliberately reconfiguring before starting again
-        self.risk.reset_halt()
 
     async def broadcast(self, message: dict):
         dead = []
@@ -123,31 +87,17 @@ class BotManager:
         if self.client is None:
             self.client = DerivClient()
             await self.client.connect()
-        if self.model is None and os.path.exists(MODEL_PATH):
+        if self.model is None:
             self.model = load_model()
-
-    async def train_model(self, symbol: str, count: int = 5000):
-        await self.ensure_connected()
-        candles = await self.client.get_candles(symbol, count=count, granularity=60)
-        df = pd.DataFrame(candles)
-        for col in ["open", "high", "low", "close"]:
-            df[col] = df[col].astype(float)
-        model, acc = train_model_fn(df, save_path=MODEL_PATH)
-        self.model = model
-        return acc
 
     async def start(self, symbol: str):
         if self.running:
             return
         self.symbol = symbol
         await self.ensure_connected()
-        if self.model is None:
-            self.status_text = "no model trained yet -- click Train Model first"
-            return
         self.running = True
         self.status_text = f"running on {symbol}"
         self._task = asyncio.create_task(self._loop())
-
 
     async def stop(self):
         self.running = False
@@ -163,8 +113,8 @@ class BotManager:
             contract_type=action,
             symbol=self.symbol,
             stake=stake,
-            duration=self.duration,
-            duration_unit=self.duration_unit,
+            duration=config.duration,
+            duration_unit=config.duration_unit,
         )
         contract_id = buy_resp["contract_id"]
         await self.broadcast({"type": "log", "text": f"Manual {action} placed, contract {contract_id}"})
@@ -191,7 +141,7 @@ class BotManager:
 
                 feat_df = build_features(df)
                 latest = feat_df.iloc[-1]
-                decision = decide(latest, self.model, confidence_threshold=self.ml_confidence_threshold)
+                decision = decide(latest, self.model)
 
                 self.latest_row = {
                     "close": float(latest["close"]),
@@ -214,8 +164,8 @@ class BotManager:
                         contract_type=decision.action,
                         symbol=self.symbol,
                         stake=stake,
-                        duration=self.duration,
-                        duration_unit=self.duration_unit,
+                        duration=config.duration,
+                        duration_unit=config.duration_unit,
                     )
                     contract_id = buy_resp["contract_id"]
                     profit = await self.client.get_contract_result(contract_id)
@@ -258,41 +208,6 @@ class TradeRequest(BaseModel):
     action: str  # "CALL" or "PUT"
 
 
-class SettingsRequest(BaseModel):
-    stake: Optional[float] = None
-    duration: Optional[int] = None
-    daily_loss_cap: Optional[float] = None
-    max_trades_per_day: Optional[int] = None
-    max_consecutive_losses: Optional[int] = None
-    ml_confidence_threshold: Optional[float] = None
-
-
-@app.get("/api/settings")
-async def get_settings(token: str = Header(None, alias="Authorization")):
-    require_auth(token)
-    return bot.get_settings()
-
-
-@app.post("/api/settings")
-async def post_settings(req: SettingsRequest, token: str = Header(None, alias="Authorization")):
-    require_auth(token)
-    try:
-        bot.update_settings(**{k: v for k, v in req.dict().items() if v is not None})
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return bot.get_settings()
-
-
-@app.post("/api/train")
-async def train_endpoint(req: StartRequest, token: str = Header(None, alias="Authorization")):
-    require_auth(token)
-    try:
-        acc = await bot.train_model(req.symbol)
-        return {"trained": True, "holdout_accuracy": acc}
-    except Exception as e:
-        raise HTTPException(500, f"Training failed: {e}")
-
-
 @app.post("/api/start")
 async def start_bot(req: StartRequest, token: str = Header(None, alias="Authorization")):
     require_auth(token)
@@ -329,7 +244,6 @@ async def status(token: str = Header(None, alias="Authorization")):
         "trades_today": bot.risk.trades_today,
         "balance": bot.client.balance if bot.client else None,
         "is_virtual": bot.client.is_virtual if bot.client else None,
-        "model_trained": bot.model is not None,
     }
 
 
